@@ -542,6 +542,64 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
+
+  // ── /leaderxp ─────────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'leaderxp') {
+    const db = loadDB();
+
+    // Sort all users by totalXp descending, take top 10
+    const top10 = Object.entries(db)
+      .filter(([, u]) => u.totalXp > 0)
+      .sort(([, a], [, b]) => b.totalXp - a.totalXp)
+      .slice(0, 10);
+
+    if (top10.length === 0) {
+      return interaction.reply({ content: '📭 No XP data yet — start chatting to earn XP!', ephemeral: false });
+    }
+
+    const medals = ['🥇', '🥈', '🥉'];
+    const lines = await Promise.all(
+      top10.map(async ([userId, u], i) => {
+        let name;
+        try {
+          const member = await interaction.guild.members.fetch(userId).catch(() => null);
+          name = member ? (member.nickname || member.user.username) : `Unknown User`;
+        } catch {
+          name = `Unknown User`;
+        }
+        const prefix = medals[i] || `**${i + 1}.**`;
+        return `${prefix} ${name} — **${u.totalXp} XP**`;
+      })
+    );
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 XP Leaderboard — Top 10')
+      .setColor(0xFFD700)
+      .setDescription(lines.join('\n'))
+      .setFooter({ text: 'Based on total XP earned' })
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [embed], ephemeral: false });
+  }
+
+  // ── /xpcheck ──────────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'xpcheck') {
+    const targetUser = interaction.options.getUser('user');
+    const db   = loadDB();
+    const user = getUser(db, targetUser.id);
+    resetIfNeeded(user);
+    saveDB(db);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`⭐ XP Check — ${targetUser.username}`)
+      .setColor(0x5865F2)
+      .setDescription(`**${targetUser.username}** has **${user.totalXp} XP** total.`)
+      .setThumbnail(targetUser.displayAvatarURL())
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [embed], ephemeral: false });
+  }
+
 });
 
 // ─── REGISTER COMMANDS ────────────────────────────────────────────────────────
@@ -552,7 +610,7 @@ async function registerCommands() {
       .setDescription('Check your total and daily Chat XP'),
     new SlashCommandBuilder()
       .setName('redeemxp')
-      .setDescription('Redeem your XP for Robux (costs 2500 XP, max 2x per month)'),
+      .setDescription('Redeem your XP for Robux (costs 15 XP, max 2x per month)'),
     new SlashCommandBuilder()
       .setName('requestresetlimit')
       .setDescription('Request admins to reset your monthly redeem limit (1x per week, 6h cooldown)'),
@@ -575,6 +633,13 @@ async function registerCommands() {
       .setName('adminabuselimits')
       .setDescription('(Admin only) Remove a user\'s withdraw limit')
       .addUserOption(opt => opt.setName('user').setDescription('The user to reset').setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('leaderxp')
+      .setDescription('Show the top 10 XP leaderboard'),
+    new SlashCommandBuilder()
+      .setName('xpcheck')
+      .setDescription('Check how much XP a user has')
+      .addUserOption(opt => opt.setName('user').setDescription('The user to check').setRequired(true)),
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
