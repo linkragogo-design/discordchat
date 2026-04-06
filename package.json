@@ -1,0 +1,20 @@
+{
+  "name": "chatxp-bot",
+  "version": "1.0.0",
+  "description": "Discord ChatXP Bot with Robux redemption",
+  "main": "index.js",
+  "scripts": {
+    "start": "node -r dotenv/config index.js"
+  },
+  "dependencies": {
+    "@discordjs/rest": "^2.6.1",
+    "discord-api-types": "^0.38.44",
+    "discord.js": "^14.26.2",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
