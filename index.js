@@ -51,6 +51,7 @@ function getUser(db, userId) {
       lastDailyReset: todayKey(),
       monthlyRedeems: 0,
       lastMonthReset: monthKey(),
+      xpTimeoutUntil: 0,
       // reset request tracking
       lastRequestTs: 0,       // timestamp of last /requestresetlimit use
       weeklyRequests: 0,      // how many requests sent this week
@@ -103,6 +104,8 @@ client.on('messageCreate', (message) => {
   const user = getUser(db, message.author.id);
   resetIfNeeded(user);
   if (user.dailyXp >= DAILY_XP_CAP) return;
+  // Timeout check — if user is XP-timed-out, skip
+  if (user.xpTimeoutUntil && Date.now() < user.xpTimeoutUntil) return;
   const gained     = Math.floor(Math.random() * (XP_PER_MSG_MAX - XP_PER_MSG_MIN + 1)) + XP_PER_MSG_MIN;
   const actualGain = Math.min(gained, DAILY_XP_CAP - user.dailyXp);
   user.totalXp += actualGain;
@@ -690,27 +693,141 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed], ephemeral: false });
   }
 
+
+  // ── /giveoutall ───────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'giveoutall') {
+    if (!ADMIN_IDS.includes(interaction.user.id)) return interaction.reply({ content: `🚫 **Access Denied.** Pls don't try again.`, ephemeral: true });
+
+    const xpAmount = interaction.options.getInteger('xp');
+    const reason   = interaction.options.getString('reason');
+
+    if (xpAmount > 1500) {
+      return interaction.reply({ content: `❌ Max XP you can give out at once is **1500 XP**.`, ephemeral: true });
+    }
+
+    await interaction.reply({ content: `⏳ Giving **${xpAmount} XP** to all members... this may take a moment!`, ephemeral: true });
+
+    // Fetch all members
+    const guild = interaction.guild;
+    await guild.members.fetch();
+    const members = guild.members.cache.filter(m => !m.user.bot);
+
+    const db = loadDB();
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const [, member] of members) {
+      const user = getUser(db, member.id);
+      resetIfNeeded(user);
+      user.totalXp += xpAmount;
+
+      // DM each member
+      try {
+        await member.send(
+          `🎁 **Wow! An admin gave out XP as a gift!**\n\n` +
+          `You received **+${xpAmount} XP**! 🎉\n` +
+          `${reason ? `**Reason:** ${reason}\n` : ''}` +
+          `Your new total is **${user.totalXp} XP**. Keep chatting!`
+        );
+        successCount++;
+      } catch {
+        failCount++; // DMs off, skip silently
+      }
+    }
+
+    saveDB(db);
+
+    const embed = new EmbedBuilder()
+      .setTitle('🎁 XP Given Out to All Members')
+      .setColor(0xFFD700)
+      .addFields(
+        { name: '➕ XP Given',       value: `**${xpAmount} XP** each`,     inline: true },
+        { name: '👥 Members',        value: `**${members.size}**`,          inline: true },
+        { name: '✅ DMs Sent',       value: `**${successCount}**`,          inline: true },
+        { name: '❌ DMs Failed',     value: `**${failCount}** (DMs off)`,   inline: true },
+        { name: '📝 Reason',         value: reason || 'No reason given',    inline: false },
+      )
+      .setFooter({ text: `Given by ${interaction.user.username}` })
+      .setTimestamp();
+
+    return interaction.followUp({ embeds: [embed], ephemeral: true });
+  }
+
+  // ── /timeoutxp ────────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'timeoutxp') {
+    if (!ADMIN_IDS.includes(interaction.user.id)) return interaction.reply({ content: `🚫 **Access Denied.** Pls don't try again.`, ephemeral: true });
+
+    const targetUser = interaction.options.getUser('user');
+    const duration   = interaction.options.getInteger('duration');
+    const unit       = interaction.options.getString('unit');   // 'hours' or 'days'
+    const reason     = interaction.options.getString('reason');
+
+    const ms = unit === 'days' ? duration * 24 * 60 * 60 * 1000 : duration * 60 * 60 * 1000;
+    const until = Date.now() + ms;
+    const untilStr = `<t:${Math.floor(until / 1000)}:F>`;
+
+    const db   = loadDB();
+    const user = getUser(db, targetUser.id);
+    resetIfNeeded(user);
+    user.xpTimeoutUntil = until;
+    saveDB(db);
+
+    // DM the user
+    try {
+      const dmTarget = await client.users.fetch(targetUser.id);
+      await dmTarget.send(
+        `⏳ **You have been timed out from earning XP.**\n\n` +
+        `You cannot earn XP until: ${untilStr}\n` +
+        `**Duration:** ${duration} ${unit}\n` +
+        `**Reason:** ${reason || 'No reason given'}\n\n` +
+        `If you think this is a mistake, please contact an admin.`
+      );
+    } catch { /* DMs off */ }
+
+    const embed = new EmbedBuilder()
+      .setTitle('⏳ XP Timeout Applied')
+      .setColor(0xED4245)
+      .addFields(
+        { name: '👤 User',       value: `${targetUser.username} (${targetUser.id})`, inline: false },
+        { name: '⏱️ Duration',   value: `**${duration} ${unit}**`,                   inline: true  },
+        { name: '🔓 Expires',    value: untilStr,                                    inline: true  },
+        { name: '📝 Reason',     value: reason || 'No reason given',                 inline: false },
+      )
+      .setFooter({ text: `Timed out by ${interaction.user.username}` })
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
 });
 
 // ─── REGISTER COMMANDS ────────────────────────────────────────────────────────
 async function registerCommands() {
   const commands = [
+    // ── Public commands ────────────────────────────────────────────────────────
     new SlashCommandBuilder()
       .setName('chatxp')
       .setDescription('Check your total and daily Chat XP'),
     new SlashCommandBuilder()
       .setName('redeemxp')
-      .setDescription('Redeem your XP for Robux (costs 15 XP, max 2x per month)'),
+      .setDescription('Redeem your XP for Robux (costs 2500 XP, max 2x per month)'),
     new SlashCommandBuilder()
       .setName('requestresetlimit')
       .setDescription('Request admins to reset your monthly redeem limit (1x per week, 6h cooldown)'),
     new SlashCommandBuilder()
+      .setName('leaderxp')
+      .setDescription('Show the top 10 XP leaderboard'),
+    new SlashCommandBuilder()
+      .setName('xpcheck')
+      .setDescription('Check how much XP a user has')
+      .addUserOption(opt => opt.setName('user').setDescription('The user to check').setRequired(true)),
+    // ── Admin-only commands (hidden from non-admins via setDefaultMemberPermissions(0)) ─
+    new SlashCommandBuilder()
       .setName('adminabuse')
-      .setDescription('(Admin only) Add or set XP for any user')
+      .setDescription('(Admin only) Add, set or remove XP for a user')
+      .setDefaultMemberPermissions(0)
       .addStringOption(opt =>
-        opt.setName('mode')
-          .setDescription('Add XP on top, or set their total XP')
-          .setRequired(true)
+        opt.setName('mode').setDescription('What to do').setRequired(true)
           .addChoices(
             { name: 'Add XP',    value: 'add'    },
             { name: 'Set XP',    value: 'set'    },
@@ -721,15 +838,36 @@ async function registerCommands() {
       .addIntegerOption(opt => opt.setName('xp').setDescription('XP amount').setRequired(true).setMinValue(0)),
     new SlashCommandBuilder()
       .setName('adminabuselimits')
-      .setDescription('(Admin only) Remove a user\'s withdraw limit')
+      .setDescription('(Admin only) Reset a user withdraw limit')
+      .setDefaultMemberPermissions(0)
       .addUserOption(opt => opt.setName('user').setDescription('The user to reset').setRequired(true)),
     new SlashCommandBuilder()
-      .setName('leaderxp')
-      .setDescription('Show the top 10 XP leaderboard'),
+      .setName('giveoutall')
+      .setDescription('(Admin only) Give XP to every member in the server (max 1500)')
+      .setDefaultMemberPermissions(0)
+      .addIntegerOption(opt =>
+        opt.setName('xp').setDescription('XP to give everyone (max 1500)').setRequired(true).setMinValue(1).setMaxValue(1500)
+      )
+      .addStringOption(opt =>
+        opt.setName('reason').setDescription('Reason for the giveout').setRequired(false)
+      ),
     new SlashCommandBuilder()
-      .setName('xpcheck')
-      .setDescription('Check how much XP a user has')
-      .addUserOption(opt => opt.setName('user').setDescription('The user to check').setRequired(true)),
+      .setName('timeoutxp')
+      .setDescription('(Admin only) Stop a user from earning XP for a set time')
+      .setDefaultMemberPermissions(0)
+      .addUserOption(opt =>
+        opt.setName('user').setDescription('The user to timeout').setRequired(true)
+      )
+      .addIntegerOption(opt =>
+        opt.setName('duration').setDescription('How long').setRequired(true).setMinValue(1)
+      )
+      .addStringOption(opt =>
+        opt.setName('unit').setDescription('Hours or Days').setRequired(true)
+          .addChoices({ name: 'Hours', value: 'hours' }, { name: 'Days', value: 'days' })
+      )
+      .addStringOption(opt =>
+        opt.setName('reason').setDescription('Reason for the timeout').setRequired(false)
+      ),
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
