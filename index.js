@@ -705,9 +705,10 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `❌ Max XP you can give out at once is **1500 XP**.`, ephemeral: true });
     }
 
-    await interaction.reply({ content: `⏳ Giving **${xpAmount} XP** to all members... this may take a moment!`, ephemeral: true });
+    // Defer immediately so Discord doesn't time out while we work
+    await interaction.deferReply({ ephemeral: true });
 
-    // Fetch all members
+    // Do all the heavy work AFTER deferring
     const guild = interaction.guild;
     await guild.members.fetch();
     const members = guild.members.cache.filter(m => !m.user.bot);
@@ -721,7 +722,6 @@ client.on('interactionCreate', async (interaction) => {
       resetIfNeeded(user);
       user.totalXp += xpAmount;
 
-      // DM each member
       try {
         await member.send(
           `🎁 **Wow! An admin gave out XP as a gift!**\n\n` +
@@ -731,7 +731,7 @@ client.on('interactionCreate', async (interaction) => {
         );
         successCount++;
       } catch {
-        failCount++; // DMs off, skip silently
+        failCount++;
       }
     }
 
@@ -741,16 +741,17 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle('🎁 XP Given Out to All Members')
       .setColor(0xFFD700)
       .addFields(
-        { name: '➕ XP Given',       value: `**${xpAmount} XP** each`,     inline: true },
-        { name: '👥 Members',        value: `**${members.size}**`,          inline: true },
-        { name: '✅ DMs Sent',       value: `**${successCount}**`,          inline: true },
-        { name: '❌ DMs Failed',     value: `**${failCount}** (DMs off)`,   inline: true },
-        { name: '📝 Reason',         value: reason || 'No reason given',    inline: false },
+        { name: '➕ XP Given',   value: `**${xpAmount} XP** each`,   inline: true },
+        { name: '👥 Members',    value: `**${members.size}**`,        inline: true },
+        { name: '✅ DMs Sent',   value: `**${successCount}**`,        inline: true },
+        { name: '❌ DMs Failed', value: `**${failCount}** (DMs off)`, inline: true },
+        { name: '📝 Reason',     value: reason || 'No reason given',  inline: false },
       )
       .setFooter({ text: `Given by ${interaction.user.username}` })
       .setTimestamp();
 
-    return interaction.followUp({ embeds: [embed], ephemeral: true });
+    // editReply instead of followUp since we deferred
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /timeoutxp ────────────────────────────────────────────────────────────────
