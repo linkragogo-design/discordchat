@@ -93,6 +93,9 @@ const client = new Client({
   ],
 });
 
+// Temp store for pending XP removals (admin fills reason in modal)
+const pendingRemoves = new Map();
+
 // ─── XP ON CHAT ───────────────────────────────────────────────────────────────
 client.on('messageCreate', (message) => {
   if (message.author.bot) return;
@@ -475,7 +478,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand() && interaction.commandName === 'adminabuse') {
     if (!ADMIN_IDS.includes(interaction.user.id)) return interaction.reply({ content: `🚫 **Access Denied.** Pls don't try again.`, ephemeral: true });
 
-    const mode       = interaction.options.getString('mode');   // 'add' or 'set'
+    const mode       = interaction.options.getString('mode');
     const targetUser = interaction.options.getUser('user');
     const xpAmount   = interaction.options.getInteger('xp');
 
@@ -487,26 +490,113 @@ client.on('interactionCreate', async (interaction) => {
 
     if (mode === 'add') {
       user.totalXp += xpAmount;
+      saveDB(db);
+
+      // DM the user — blessed message, no admin name
+      try {
+        const dmUser = await client.users.fetch(targetUser.id);
+        await dmUser.send(
+          `🌟 **Wow your day got blessed lil bro by an admin!**\n\n` +
+          `You received **+${xpAmount} XP**!\n` +
+          `Your new total is **${user.totalXp} XP**. Keep chatting! 🎉`
+        );
+      } catch { /* DMs off, silently skip */ }
+
+      const embed = new EmbedBuilder()
+        .setTitle('🛠️ Admin XP Grant')
+        .setColor(0xFF6B00)
+        .addFields(
+          { name: '👤 User',       value: `${targetUser.username} (${targetUser.id})`, inline: false },
+          { name: '🔧 Mode',       value: '**Add XP**',                                inline: true  },
+          { name: '➕ XP Added',   value: `**+${xpAmount} XP**`,                       inline: true  },
+          { name: '📊 XP Before', value: `${oldXp} XP`,                               inline: true  },
+          { name: '⭐ XP After',  value: `**${user.totalXp} XP**`,                    inline: true  },
+        )
+        .setFooter({ text: `Done by ${interaction.user.username}` })
+        .setTimestamp();
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+
     } else if (mode === 'remove') {
-      user.totalXp = Math.max(0, user.totalXp - xpAmount);
+      // Don't apply yet — show a modal to enter the reason first
+      // Store pending remove in a temp map so we can apply after modal submit
+      pendingRemoves.set(interaction.user.id, { targetUserId: targetUser.id, xpAmount });
+
+      const modal = new ModalBuilder()
+        .setCustomId(`remove_xp_reason_${targetUser.id}_${xpAmount}`)
+        .setTitle('➖ Remove XP — Enter Reason');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('remove_reason')
+            .setLabel('Reason for removing XP')
+            .setPlaceholder('e.g. Cheating, spam, rule violation...')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+        )
+      );
+      return interaction.showModal(modal);
+
     } else {
-      // set — replace their XP entirely
+      // set mode
       user.totalXp = xpAmount;
+      saveDB(db);
+
+      const embed = new EmbedBuilder()
+        .setTitle('🛠️ Admin XP Set')
+        .setColor(0xFF6B00)
+        .addFields(
+          { name: '👤 User',       value: `${targetUser.username} (${targetUser.id})`, inline: false },
+          { name: '🔧 Mode',       value: '**Set XP**',                                inline: true  },
+          { name: '📝 XP Set To', value: `**${xpAmount} XP**`,                         inline: true  },
+          { name: '📊 XP Before', value: `${oldXp} XP`,                               inline: true  },
+          { name: '⭐ XP After',  value: `**${user.totalXp} XP**`,                    inline: true  },
+        )
+        .setFooter({ text: `Done by ${interaction.user.username}` })
+        .setTimestamp();
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
     }
+  }
+
+  // ── Modal: remove XP reason ───────────────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('remove_xp_reason_')) {
+    const parts     = interaction.customId.split('_');
+    // customId format: remove_xp_reason_{targetUserId}_{xpAmount}
+    const xpAmount    = parseInt(parts[parts.length - 1]);
+    const targetUserId = parts[parts.length - 2];
+    const reason      = interaction.fields.getTextInputValue('remove_reason');
+
+    const db   = loadDB();
+    const user = getUser(db, targetUserId);
+    resetIfNeeded(user);
+
+    const oldXp = user.totalXp;
+    user.totalXp = Math.max(0, user.totalXp - xpAmount);
     saveDB(db);
 
-    const modeLabel = mode === 'add' ? '➕ XP Added' : mode === 'remove' ? '➖ XP Removed' : '📝 XP Set To';
-    const modeValue = mode === 'add' ? `**+${xpAmount} XP**` : mode === 'remove' ? `**-${xpAmount} XP**` : `**${xpAmount} XP**`;
+    // DM the user with the reason
+    try {
+      const dmUser = await client.users.fetch(targetUserId);
+      await dmUser.send(
+        `❌ **An admin has removed XP from your account.**\n\n` +
+        `**XP Removed:** ${xpAmount} XP\n` +
+        `**Reason:** ${reason}\n\n` +
+        `Your new total is **${user.totalXp} XP**.\n` +
+        `If you think this is a mistake, please contact an admin.`
+      );
+    } catch { /* DMs off, silently skip */ }
 
     const embed = new EmbedBuilder()
-      .setTitle('🛠️ Admin XP Grant')
+      .setTitle('🛠️ Admin XP Remove')
       .setColor(0xFF6B00)
       .addFields(
-        { name: '👤 User',        value: `${targetUser.username} (${targetUser.id})`, inline: false },
-        { name: '🔧 Mode',        value: mode === 'add' ? '**Add XP**' : mode === 'remove' ? '**Remove XP**' : '**Set XP**', inline: true },
-        { name: modeLabel,        value: modeValue,                                    inline: true },
-        { name: '📊 XP Before',  value: `${oldXp} XP`,                                inline: true },
-        { name: '⭐ XP After',   value: `**${user.totalXp} XP**`,                     inline: true },
+        { name: '👤 User',        value: `<@${targetUserId}> (${targetUserId})`, inline: false },
+        { name: '🔧 Mode',        value: '**Remove XP**',                        inline: true  },
+        { name: '➖ XP Removed',  value: `**-${xpAmount} XP**`,                  inline: true  },
+        { name: '📊 XP Before',  value: `${oldXp} XP`,                          inline: true  },
+        { name: '⭐ XP After',   value: `**${user.totalXp} XP**`,               inline: true  },
+        { name: '📝 Reason',     value: reason,                                  inline: false },
       )
       .setFooter({ text: `Done by ${interaction.user.username}` })
       .setTimestamp();
